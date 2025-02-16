@@ -1,4 +1,3 @@
-// timer_service.dart
 import 'dart:async';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
@@ -6,6 +5,7 @@ import 'package:timezone/data/latest.dart' as tz;
 import 'package:flutter/services.dart';
 import 'package:audioplayers/audioplayers.dart';
 import '../../database_operations/settings_model.dart';
+import 'package:flutter/foundation.dart';
 
 class TimerService {
   Timer? _timer;
@@ -18,6 +18,7 @@ class TimerService {
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
   final AudioPlayer _audioPlayer = AudioPlayer();
+  bool _isCompleted = false;
 
   TimerService({
     required this.onRunningStateChanged,
@@ -36,6 +37,7 @@ class TimerService {
       importance: Importance.max,
       enableVibration: true,
       playSound: true,
+      sound: RawResourceAndroidNotificationSound('sci_fi_alarm.mp3'),
     );
 
     // Create the channel on Android
@@ -50,13 +52,15 @@ class TimerService {
       requestAlertPermission: true,
       requestBadgePermission: true,
       requestSoundPermission: true,
+      requestCriticalPermission: true,
+      requestProvisionalPermission: true,
     );
+
     const initializationSettings = InitializationSettings(
       android: initializationSettingsAndroid,
       iOS: initializationSettingsIOS,
     );
 
-    // Initialize notifications and request permissions
     await _notifications.initialize(
       initializationSettings,
       onDidReceiveNotificationResponse:
@@ -64,19 +68,10 @@ class TimerService {
         // Handle notification tapped logic here
       },
     );
-
-    // Request permissions for iOS
-    await _notifications
-        .resolvePlatformSpecificImplementation<
-            IOSFlutterLocalNotificationsPlugin>()
-        ?.requestPermissions(
-          alert: true,
-          badge: true,
-          sound: true,
-        );
   }
 
   bool get isRunning => _isRunning;
+  bool get isCompleted => _isCompleted;
   int get currentDuration => _currentDuration;
   double get progress => _totalDurationSeconds == 0
       ? 0
@@ -84,20 +79,16 @@ class TimerService {
 
   Future<void> startTimer(int durationInMinutes) async {
     _isRunning = true;
+    _isCompleted = false;
     _totalDurationSeconds = durationInMinutes * 60;
     _currentDuration = _totalDurationSeconds;
-
-    // Schedule notification if enabled in settings
-    if (settings?.areNotificationsEnabled ?? false) {
-      await _scheduleNotification(durationInMinutes);
-    }
 
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (_currentDuration > 0) {
         _currentDuration--;
         onTick();
-      } else {
+      } else if (!_isCompleted) {
         _onTimerComplete();
       }
     });
@@ -105,70 +96,76 @@ class TimerService {
     onRunningStateChanged(_isRunning);
   }
 
-  Future<void> _scheduleNotification(int durationInMinutes) async {
-    const androidDetails = AndroidNotificationDetails(
+  Future<void> _showCompletionNotification() async {
+    var androidDetails = AndroidNotificationDetails(
       'timer_notification_channel',
       'Timer Notifications',
       channelDescription: 'Notifications for timer completion',
       importance: Importance.max,
       priority: Priority.high,
+      sound: const RawResourceAndroidNotificationSound('sci_fi_alarm'),
+      playSound: true,
+      enableVibration: true,
+      vibrationPattern: Int64List.fromList([0, 500, 200, 500]),
     );
 
     const iosDetails = DarwinNotificationDetails(
       presentAlert: true,
       presentBadge: true,
       presentSound: true,
+      sound: 'sci_fi_alarm.wav',
+      interruptionLevel: InterruptionLevel.critical,
     );
 
-    const notificationDetails = NotificationDetails(
+    var notificationDetails = NotificationDetails(
       android: androidDetails,
       iOS: iosDetails,
     );
 
-    await _notifications.zonedSchedule(
+    await _notifications.show(
       0,
       'Timer Complete!',
-      'Your timer for $durationInMinutes minutes has finished',
-      tz.TZDateTime.now(tz.local).add(Duration(minutes: durationInMinutes)),
+      'Enter what you accomplished!',
       notificationDetails,
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
     );
   }
 
   Future<void> _onTimerComplete() async {
+    _isCompleted = true;
     if (settings?.isAlarmEnabled ?? false) {
       try {
-        // Play alarm sound
-        await _audioPlayer.play(AssetSource('sounds/alarm.mp3'));
+        // Play alarm sound with correct path and volume
+        await _audioPlayer.setVolume(1.0);
+        await _audioPlayer.play(AssetSource('sounds/sci-fi-alarm.mp3'));
 
-        // Vibrate device with pattern
-        await HapticFeedback.heavyImpact();
-        await Future.delayed(Duration(milliseconds: 200));
-        await HapticFeedback.heavyImpact();
+        // Aggressive vibration pattern
+        for (int i = 0; i < 3; i++) {
+          await HapticFeedback.heavyImpact();
+          await Future.delayed(const Duration(milliseconds: 200));
+        }
       } catch (e) {
-        print('Error playing alarm: $e');
+        debugPrint('Error playing alarm: $e');
       }
 
-      // Show notification
+      // Show notification immediately
       if (settings?.areNotificationsEnabled ?? false) {
-        await _scheduleNotification(_totalDurationSeconds ~/ 60);
+        await _showCompletionNotification();
       }
     }
-
-    stopTimer();
+    // Don't stop timer - keep running until submission
+    onTick();
   }
 
   Future<void> stopTimer() async {
     _timer?.cancel();
     _isRunning = false;
+    _isCompleted = false;
     _currentDuration = _totalDurationSeconds;
 
-    // Cancel scheduled notification
+    // Cancel notification
     await _notifications.cancel(0);
 
-    // Stop alarm if it's playing
+    // Stop alarm if playing
     await _audioPlayer.stop();
 
     onRunningStateChanged(_isRunning);
@@ -177,8 +174,9 @@ class TimerService {
 
   void resetTimer() {
     _currentDuration = _totalDurationSeconds;
+    _isCompleted = false;
     if (_isRunning) {
-      startTimer(_totalDurationSeconds ~/ 60); // Convert back to minutes
+      startTimer(_totalDurationSeconds ~/ 60);
     }
     onTick();
   }
